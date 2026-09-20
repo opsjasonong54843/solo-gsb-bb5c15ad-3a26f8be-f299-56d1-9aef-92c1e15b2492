@@ -34,6 +34,13 @@ k（2～50），仅从可完整配对的已保存记录生成「进站 → 出�
 用动态规划求每张卡总支出最低的购买序列，同价时依次选择通票更少、
 首次购买日更早、名称字典序更小的方案，展示基准支出、通票支出、节省额
 与逐次购买明细（只读，不改记录、配置或账单）。
+另支持**账单争议更正预演**：对最近一次核验账单有异议时，按原始来源行号
+选择**同一张卡的 1～2 笔**已保存刷卡记录，每笔仅临时修改时刻或站点；
+后端在内存中原子替换后对全部记录重新排序、配对与计价（不写回记录、配置
+或账单），以「进站原始行号-出站原始行号」作为行程标识，对比当前账单与
+更正方案，列出新增、移除及金额 / 运营日 / 优惠变化，汇总该卡补收或退款额，
+并可一键复制争议摘要；更正后出现配对、未知站点或缺票价错误时按原有定位
+错误返回且不产出差额，跨卡选择、重复行号或修改值非法返回明确错误。
 
 - 后端：FastAPI（Python 3.11）
 - 数据库：SQLite（标准库 `sqlite3`，金额以**整数分**存储）
@@ -229,6 +236,32 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
       产品行格式、重复名称、价格、有效天数非法返回 `PASS_BAD_*` /
       `PASS_DUPLICATE`，产品为空返回 `PASS_EMPTY`；
     - 回测**全程只读**：不修改记录、配置，也不写入或清空账单。
+16. **账单争议更正预演**：在「15. 账单争议更正预演」区对最近一次成功核验的
+    账单做「如果当时刷卡时刻 / 站点记错了」的只读预演。
+    - 用户按**原始来源行号**选择**同一张卡的 1～2 笔**已保存刷卡记录，每笔
+      **仅可临时修改时刻或站点**（可同时改两者；卡号与进/出方向不可改）；
+      新时刻支持与记录录入相同的一整套时刻格式（月日格式补当前年），
+      新站点必须是已保存站点分区中的**已知站点**。
+    - 后端在**内存中原子替换**被选中的记录（原始对象与数据库均不变），随后
+      对全部记录执行与 `/api/verify` **完全相同**的重新排序、配对与计价；
+      更正后只要出现任何配对（缺失进出站、时间逆序、重复刷卡）、未知站点或
+      缺票价错误，就按 `verify()` 的**原有定位错误**（错误码、行号、卡号、
+      时刻、站点）返回 422，**不产出任何差额**。
+    - 以**最近一次成功核验账单**为当前账单基准（无账单时返回
+      `DISPUTE_NO_BILLS`），行程标识统一为
+      **（进站原始行号, 出站原始行号）**：仅更正方案有的行程为**新增**、
+      仅当前账单有的为**移除**、标识相同但运营日 / 时刻 / 站点 / 基础票价 /
+      优惠（含优惠说明）/ 实扣任一不同的为**变化**，其余计入无变化。
+    - 变化行程逐程给出运营日（发生归属变化时高亮）、当前 → 更正的进出站、
+      基础票价差额、优惠差额与实扣差额；并按该卡汇总当前 / 更正实扣合计、
+      优惠合计与**实扣差额**：差额为正即**应补收**、为负即**应退款**、
+      为 0 即无需补退。
+    - 选择 / 取值非法时返回明确的 `DISPUTE_*` 错误（见下文错误码一览）：
+      跨卡选择、重复行号、行号不存在、行号非正整数、超过 2 笔、
+      未给任何新值、新时刻无法解析、新站点未定义。
+    - 预演**全程只读**：不写回刷卡记录、规则配置，也不写入或清空账单；
+      页面提供修改输入、新增 / 移除 / 变化结果高亮（行号可点击定位到
+      「5. 刷卡记录」）与**一键复制争议摘要**。
 
 ## 录入格式
 
@@ -298,6 +331,7 @@ DB_PATH=./bus.db uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/api/od-flow-publish` | 匿名客流 OD 发布（只读，不改记录/配置/账单） |
 | POST | `/api/gate-queue-sim` | 闸机容量排队推演（只读，不改记录/配置/账单） |
 | POST | `/api/pass-backtest` | 通票购买策略回测（只读，基于最近一次核验账单） |
+| POST | `/api/dispute-rehearsal` | 账单争议更正预演（只读，内存临时替换，不写回记录/配置/账单） |
 | GET | `/api/bills` | 读取最近一次成功核验的账单 |
 | GET | `/api/health` | 健康检查 |
 
@@ -962,6 +996,119 @@ HTTP 422，错误对象与 `/api/verify` 完全一致，且不返回任何方案
 回测为只读操作：只执行 SELECT 与内存动态规划，不修改记录、配置，
 也不写入或清空账单。
 
+### `/api/dispute-rehearsal` 账单争议更正预演
+
+请求体为同一卡 **1～2 笔**记录的临时修改列表：`line` 为刷卡记录的**原始
+来源行号**（正整数），`new_time` / `new_station` 至少给一个、只临时修改
+时刻或站点（卡号与进/出方向不可改）；`new_time` 支持与记录录入相同的一整
+套时刻格式（月日格式补当前年），`new_station` 必须是已保存站点分区中的
+已知站点。
+
+```json
+{
+  "edits": [
+    { "line": 2, "new_station": "大学城" },
+    { "line": 1, "new_time": "2026-09-18 08:05:00" }
+  ]
+}
+```
+
+后端在内存中原子替换后，对全部已保存记录重新排序、配对与计价（复用
+`verify()` 全部规则），以**最近一次成功核验账单**为当前账单基准，按
+**（进站原始行号, 出站原始行号）**标识行程进行对比。两方案均成立时返回
+`200`：
+
+```json
+{
+  "ok": true,
+  "card": "A001",
+  "edits": [
+    { "line": 2, "card": "A001", "action": "OUT",
+      "old_time": "2026-09-18 08:25:00", "new_time": "2026-09-18 08:25:00",
+      "old_station": "中心公园", "new_station": "大学城",
+      "time_changed": false, "station_changed": true }
+  ],
+  "added": [ ],
+  "removed": [ ],
+  "changed": [
+    {
+      "status": "changed", "card": "A001", "entry_line": 1, "exit_line": 2,
+      "current": { "operating_day": "2026-09-18",
+        "entry_time": "2026-09-18 08:00:00", "exit_time": "2026-09-18 08:25:00",
+        "entry_station": "科技园", "exit_station": "中心公园",
+        "from_zone": 1, "to_zone": 2,
+        "base_fare": 3.0, "discount": 0.0,
+        "discount_source": "无", "charged_fare": 3.0, "daily_cumulative": 3.0 },
+      "corrected": { "operating_day": "2026-09-18",
+        "entry_time": "2026-09-18 08:00:00", "exit_time": "2026-09-18 08:25:00",
+        "entry_station": "科技园", "exit_station": "大学城",
+        "from_zone": 1, "to_zone": 3,
+        "base_fare": 4.0, "discount": 0.0,
+        "discount_source": "无", "charged_fare": 4.0, "daily_cumulative": 4.0 },
+      "base_fare_diff": 1.0, "discount_diff": 0.0, "charge_diff": 1.0,
+      "day_changed": false, "station_changed": true, "time_changed": false,
+      "discount_changed": false, "base_fare_changed": true, "charged_changed": true
+    }
+  ],
+  "unchanged_count": 2,
+  "current_trip_count": 3,
+  "corrected_trip_count": 3,
+  "card_summary": {
+    "card": "A001",
+    "current_trip_count": 3, "corrected_trip_count": 3,
+    "added_count": 0, "removed_count": 0, "changed_count": 1, "unchanged_count": 2,
+    "current_charge_total": 9.0, "corrected_charge_total": 10.0, "charge_diff": 1.0,
+    "current_discount_total": 1.0, "corrected_discount_total": 1.0,
+    "discount_diff": 0.0,
+    "settlement": "collect", "settlement_text": "应补收 1.00 元"
+  },
+  "summary_text": "【账单争议更正预演摘要 · 卡号 A001】\n…"
+}
+```
+
+- `added[]` / `removed[]`：仅更正方案有 / 仅当前账单有的行程，行结构与
+  `changed[]` 相同，但缺失一侧的 `current` / `corrected` 为 `null`；
+  行程在两侧的进出行号可点击定位到「5. 刷卡记录」。
+- `changed[]`：标识相同但运营日、时刻、站点、基础票价、优惠（含优惠说明）
+  或实扣任一发生变化的行程；`*_diff` 口径统一为**更正 − 当前**，
+  `*_changed` 为各字段是否变化的布尔标记。
+- `card_summary.settlement`：`collect`（实扣差额 > 0，应补收）/
+  `refund`（< 0，应退款）/ `none`（= 0）。
+- `summary_text`：可直接一键复制给乘客 / 对账方的**争议摘要纯文本**，
+  含临时修改、新增 / 移除 / 变化明细、该卡补收 / 退款结论与只读声明。
+
+选择 / 取值非法时返回 HTTP 422 与明确的 `DISPUTE_*` 错误（尽量在
+`location.line` 带上用户填写的原始行号），不执行核验、不产出差额：
+
+```json
+{ "ok": false, "card": "A001", "edits": [ ],
+  "errors": [ { "code": "DISPUTE_CROSS_CARD",
+                "message": "选择了不同卡的记录：第 8 行属于卡号 B002，而此前选择的记录属于卡号 A001；一次预演只能修改同一张卡的记录",
+                "location": { "line": 8 } } ] }
+```
+
+- `DISPUTE_NO_EDITS`：未选择任何记录；`DISPUTE_TOO_MANY_EDITS`：一次超过
+  2 笔；`DISPUTE_BAD_LINE`：行号不是不小于 1 的整数；
+  `DISPUTE_DUPLICATE_LINE`：同一行号重复选择；`DISPUTE_LINE_NOT_FOUND`：
+  已保存记录中不存在该行；`DISPUTE_CROSS_CARD`：跨卡选择；
+  `DISPUTE_NO_NEW_VALUE`：某笔修改时刻与站点都未填写；
+  `DISPUTE_BAD_TIME`：新时刻无法解析；
+  `DISPUTE_UNKNOWN_STATION_EDIT`：新站点未在站点分区中定义；
+  `DISPUTE_NO_BILLS`：尚无最近一次成功核验账单。
+
+更正后重新核验失败（配对错误 `MISSING_ENTRY` / `MISSING_EXIT` /
+`TIME_REVERSED` / `DUPLICATE_SWIPE`、未知站点 `UNKNOWN_STATION`、
+缺票价 `MISSING_FARE` 等）时同样返回 HTTP 422，错误对象与 `/api/verify`
+**完全一致**（行号仍为原始录入行号），且不返回任何对比结果：
+
+```json
+{ "ok": false, "card": "A001", "edits": [ ],
+  "errors": [ { "code": "TIME_REVERSED", "message": "…", "location": { } } ] }
+```
+
+预演为只读操作：只执行 SELECT 与内存中的替换 / 重算，不写回刷卡记录、
+规则配置，也不写入或清空账单（原始 `Swipe` 对象也不会被修改）。
+
 ## 页面操作说明（票价矩阵路径审计）
 
 1. 先在 3～5 区保存站点分区、票价矩阵与刷卡记录（审计针对**已保存**的数据；
@@ -1085,6 +1232,31 @@ HTTP 422，错误对象与 `/api/verify` 完全一致，且不返回任何方案
 3. 回测全程只读：无论结果如何，都不会修改记录、配置，也不会写入或
    清空账单。
 
+## 页面操作说明（账单争议更正预演）
+
+1. 先在第 7 区成功**运行核验**（预演以最近一次核验账单作为当前账单基准；
+   核验失败或数据被修改后账单会被清空，需重新核验），并在第 5 区保留
+   已保存记录（行号即记录的来源行）。
+2. 在「15. 账单争议更正预演」区为每笔修改填写**原始来源行号**与
+   **临时新时刻 / 新站点**（时刻、站点都留空表示该字段不改，但每笔至少
+   要改其中之一；新站点输入框带已保存站点的自动补全）。点
+   **「＋ 再选一笔（同一卡，最多 2 笔）」**可加入第二笔，第二笔可用
+   「移除该笔」撤销；两笔必须属于**同一张卡**。
+3. 点击 **「⚖️ 生成更正预演」**：
+   - 顶部回显每笔临时修改，摘要区给出该卡当前 / 更正行程数、新增 / 移除 /
+     变化笔数、实扣与优惠合计，并以醒目颜色标注**应补收 / 应退款 / 无差额**；
+   - 「新增行程」表只列更正方案产生的行程，「移除行程」表只列当前账单有、
+     更正后不再存在的行程，「变化行程」表逐程对比运营日（变化高亮）、
+     当前 → 更正的进出站（变化单元格黄色高亮）、基础票价差额、优惠差额与
+     实扣差额；各表行程标识中的**行号按钮**可点击定位到第 5 区对应记录；
+   - 点 **「📋 复制争议摘要」**复制纯文本摘要（含修改内容、行程差异、
+     补收 / 退款结论与只读声明），可直接发给乘客或对账方；
+   - 跨卡选择、重复行号、行号不存在、新时刻无法解析、新站点未定义等
+     按 `DISPUTE_*` 明确错误展示；更正后配对失败、出现未知站点或缺票价时
+     按 `/api/verify` 原有定位错误展示，**不产出任何差额**。
+4. 预演全程只读：无论成功或失败，都不会写回刷卡记录、规则配置，也不会
+   写入或清空账单。
+
 ## 页面操作说明（配对修复预览）
 
 1. 先在 3～5 区保存站点分区、票价矩阵与刷卡记录（预览针对**已保存**的数据；
@@ -1133,7 +1305,11 @@ HTTP 422，错误对象与 `/api/verify` 完全一致，且不返回任何方案
 `UNKNOWN_STATION` / `MISSING_FARE` / `DUPLICATE_SWIPE` / `TIME_REVERSED` /
 `MISSING_ENTRY` / `MISSING_EXIT` / `CONFIG_BAD` /
 `NO_BILLS` / `PASS_EMPTY` / `PASS_BAD_FIELDS` / `PASS_BAD_PRICE` /
-`PASS_BAD_DAYS` / `PASS_DUPLICATE`。
+`PASS_BAD_DAYS` / `PASS_DUPLICATE` /
+`DISPUTE_NO_EDITS` / `DISPUTE_TOO_MANY_EDITS` / `DISPUTE_BAD_LINE` /
+`DISPUTE_DUPLICATE_LINE` / `DISPUTE_LINE_NOT_FOUND` / `DISPUTE_CROSS_CARD` /
+`DISPUTE_NO_NEW_VALUE` / `DISPUTE_BAD_TIME` /
+`DISPUTE_UNKNOWN_STATION_EDIT` / `DISPUTE_NO_BILLS`。
 （路径审计与耗时审计均不新增错误码：不可达分区对沿用 `MISSING_FARE`，
 耗时审计的阻断错误沿用配对 / 时间类错误码，其余数据错误与 `/api/verify`
 完全一致；峰值审计只统计已保存记录、不产生数据错误，参数非法沿用
@@ -1145,7 +1321,9 @@ HTTP 422，错误对象与 `/api/verify` 完全一致，且不返回任何方案
 任何数据错误——它只统计已保存记录，与配对、站点、票价完全无关，
 运营日、桶粒度、容量、续算桶数、分界时刻非法时统一沿用 `CONFIG_BAD`；
 通票回测新增 `NO_BILLS`（无有效账单）与 `PASS_*`（通票产品非法），
-日期非法沿用 `CONFIG_BAD`。）
+日期非法沿用 `CONFIG_BAD`；争议预演新增 `DISPUTE_*`（选择 / 修改值非法
+与无账单），而更正后重新核验产生的错误一律沿用 `/api/verify` 原有错误码
+与定位，不新增错误码。）
 
 ## 目录结构
 
@@ -1174,10 +1352,12 @@ HTTP 422，错误对象与 `/api/verify` 完全一致，且不返回任何方案
   `trip_bill`，因此任何时刻读到的账单要么是上一次完整成功的结果，要么为空。
   `/api/trial-compare`、`/api/repair-preview`、`/api/fare-path-audit`、
   `/api/duration-audit`、`/api/station-peak-audit`、
-  `/api/external-merge-preview`、`/api/od-flow-publish` 与
-  `/api/pass-backtest` 全程只执行 SELECT，
+  `/api/external-merge-preview`、`/api/od-flow-publish`、
+  `/api/pass-backtest` 与 `/api/dispute-rehearsal` 全程只执行 SELECT，
   不调用任何写接口，配置、矩阵、记录与账单均保持不变
-  （`/api/gate-queue-sim` 同样只执行 SELECT + 内存递推）。
+  （`/api/gate-queue-sim` 同样只执行 SELECT + 内存递推；
+  `/api/dispute-rehearsal` 额外保证内存替换只发生在新建的 `Swipe`
+  副本上，原始对象也不被修改）。
 - **试算复用**：试算接口直接调用核心层 `trial_compare()`，内部对两套配置各执行一次
   `verify()`，再按 `(卡号, 卡内序号)` 对齐账单；因此配对、运营日归属、换乘抵扣与
   封顶规则与正式核验永远一致，不会出现两套口径。
@@ -1274,6 +1454,22 @@ HTTP 422，错误对象与 `/api/verify` 完全一致，且不返回任何方案
   `saving = baseline − pass_total ≥ 0`（全程不买恒为可行解）。
   重叠购买可被不重叠方案不增成本地替代，故 DP 只枚举不重叠序列
   不损失最优性。回测只执行 SELECT，不修改记录、配置或账单。
+- **争议预演**：`dispute_rehearsal()` 先对选择参数做显式校验——必须
+  1～2 笔、行号为正整数且在已保存记录中存在、不重复、全部属于同一卡、
+  每笔至少给出一个新值、新时刻可被 `parse_time()` 解析（补当前年）、
+  新站点在站点分区中已定义；任一不满足直接返回对应的 `DISPUTE_*`
+  定位错误（不执行核验）。通过后按行号在**新建的 Swipe 副本**上做内存
+  原子替换（原始 `Swipe` 与数据库均不变），对替换后的完整记录集调用
+  `verify()`：配对、未知站点、缺票价等错误原样返回且不产出任何差额。
+  对比以最近一次成功核验账单（`trip_bill`）为当前基准、只取所选卡的
+  账单行，以 **（进站原始行号, 出站原始行号）** 为行程键做集合差：
+  仅更正方案有 = 新增、仅当前有 = 移除、键相同但运营日 / 时刻 / 站点 /
+  基础票价 / 优惠（含优惠说明文本）/ 实扣任一不同 = 变化；该卡实扣合计
+  之差即补收（正）/ 退款（负）额。由于当前账单合法时同卡记录在录入顺序
+  上单调不减且进出交替，而允许的编辑又不改变任何进/出方向，保持
+  `verify()` 通过的更正不会改变按录入位置形成的 (进, 出) 配对键；新增 /
+  移除分支仍完整保留，以严格符合「按行号对列出新增、移除」的对比口径。
+  预演只执行 SELECT + 内存替换 / 重算，不写回记录、配置或账单。
 - **数据位置**：容器内 `DB_PATH=/data/bus.db`，compose 用命名卷 `bus-data` 持久化；
   可用环境变量 `DB_PATH` 覆盖路径。
 - **无外部前端依赖**：页面由 FastAPI 直接以静态文件提供，无需 npm/CDN，

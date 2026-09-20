@@ -638,6 +638,128 @@ X999, 2026-09-18 08:10:00, 中心公园, 进"></textarea>
       </div>
     </section>
 
+    <!-- 账单争议更正预演 -->
+    <section class="card" id="sec-dispute">
+      <h2>15. 账单争议更正预演</h2>
+      <p class="hint">乘客对<strong>最近一次核验账单</strong>有异议时，按<strong>原始来源行号</strong>选择
+        <strong>同一张卡的 1～2 笔</strong>已保存刷卡记录，每笔仅可<strong>临时修改时刻或站点</strong>
+        （卡号与进/出方向不可改）。后端在<strong>内存中原子替换</strong>后，对该批记录重新排序、
+        配对与计价：以「进站原始行号-出站原始行号」作为行程标识，对比<strong>当前账单</strong>与
+        <strong>更正方案</strong>，列出新增、移除及金额 / 运营日 / 优惠变化，并汇总该卡
+        <strong>补收或退款额</strong>。更正后出现配对、未知站点或缺票价错误时，按原有定位错误返回、
+        不产出差额。预演<strong>全程只读</strong>：不写回刷卡记录、规则配置或账单。</p>
+
+      <div id="dispute-edits">
+        <div class="dispute-edit-row" data-idx="0">
+          <div class="dispute-edit-head">
+            <strong>修改 ①</strong>
+            <button class="btn btn-ghost btn-mini dispute-remove" type="button" hidden>移除该笔</button>
+          </div>
+          <div class="form-grid">
+            <label>原始来源行号（「5. 刷卡记录」中的行）
+              <input type="number" class="dispute-line" min="1" step="1" placeholder="如 2" />
+            </label>
+            <label>临时新时刻（留空表示不改）
+              <input type="text" class="dispute-time" placeholder="如 2026-09-18 08:30:00" />
+            </label>
+            <label>临时新站点（留空表示不改；必须是已保存的已知站点）
+              <input type="text" class="dispute-station" list="dispute-station-options"
+                     placeholder="如 大学城" />
+            </label>
+          </div>
+        </div>
+        <div class="dispute-edit-row" data-idx="1" hidden>
+          <div class="dispute-edit-head">
+            <strong>修改 ②</strong>
+            <button class="btn btn-ghost btn-mini dispute-remove" type="button">移除该笔</button>
+          </div>
+          <div class="form-grid">
+            <label>原始来源行号
+              <input type="number" class="dispute-line" min="1" step="1" placeholder="如 4" />
+            </label>
+            <label>临时新时刻（留空表示不改）
+              <input type="text" class="dispute-time" placeholder="如 2026-09-18 09:20:00" />
+            </label>
+            <label>临时新站点（留空表示不改）
+              <input type="text" class="dispute-station" list="dispute-station-options"
+                     placeholder="如 科技园" />
+            </label>
+          </div>
+        </div>
+        <datalist id="dispute-station-options"></datalist>
+      </div>
+
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-dispute" type="button">⚖️ 生成更正预演</button>
+        <button class="btn btn-ghost" id="btn-dispute-add" type="button">＋ 再选一笔（同一卡，最多 2 笔）</button>
+        <button class="btn btn-ghost" id="btn-dispute-copy" type="button" hidden>📋 复制争议摘要</button>
+        <span id="dispute-status" class="status"></span>
+      </div>
+
+      <div id="dispute-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成更正预演 —— 请按以下提示处理（记录、配置与账单均未改动）</h3>
+        <ul id="dispute-errors-list"></ul>
+      </div>
+
+      <div id="dispute-result" class="audit-result" hidden>
+        <div id="dispute-edits-echo" class="dispute-edits-echo"></div>
+        <div id="dispute-summary" class="audit-summary"></div>
+
+        <div id="dispute-added-block" hidden>
+          <h3>🆕 新增行程（仅更正方案有）</h3>
+          <div class="table-wrap">
+            <table id="dispute-added-table">
+              <thead>
+                <tr>
+                  <th>行程标识（进站行-出站行）</th><th>运营日</th>
+                  <th>进站时刻 / 站点</th><th>出站时刻 / 站点</th>
+                  <th>基础票价</th><th>优惠</th><th>实扣</th><th>优惠说明</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="dispute-removed-block" hidden>
+          <h3>➖ 移除行程（仅当前账单有）</h3>
+          <div class="table-wrap">
+            <table id="dispute-removed-table">
+              <thead>
+                <tr>
+                  <th>行程标识（进站行-出站行）</th><th>运营日</th>
+                  <th>进站时刻 / 站点</th><th>出站时刻 / 站点</th>
+                  <th>基础票价</th><th>优惠</th><th>实扣</th><th>优惠说明</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="dispute-changed-block" hidden>
+          <h3>🔁 变化行程（金额 / 运营日 / 优惠）</h3>
+          <div class="table-wrap">
+            <table id="dispute-changed-table">
+              <thead>
+                <tr>
+                  <th>行程标识（进站行-出站行）</th>
+                  <th>运营日（当前 → 更正）</th>
+                  <th>进站（当前 → 更正）</th>
+                  <th>出站（当前 → 更正）</th>
+                  <th>基础票价差额</th>
+                  <th>优惠（当前 → 更正 / 差额）</th>
+                  <th>实扣（当前 → 更正 / 差额）</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <p id="dispute-unchanged-note" class="hint"></p>
+      </div>
+    </section>
+
     <footer class="footer">
       FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
       <a href="/docs" target="_blank">API 文档</a>

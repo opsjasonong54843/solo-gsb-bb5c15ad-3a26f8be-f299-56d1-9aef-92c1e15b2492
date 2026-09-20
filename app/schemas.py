@@ -1,6 +1,8 @@
 """API 请求模型。"""
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -92,3 +94,24 @@ class PassBacktestIn(BaseModel):
         description="通票产品文本，每行：名称, 价格（元）, 连续有效运营日数")
     start_day: str = Field(description="运营日起始日期 YYYY-MM-DD（闭区间）")
     end_day: str = Field(description="运营日结束日期 YYYY-MM-DD（闭区间）")
+
+
+class DisputeEditIn(BaseModel):
+    """账单争议更正预演中的一笔临时修改。
+
+    line 为刷卡记录的**原始来源行号**；new_time / new_station 至少给一个，
+    只允许临时修改时刻或站点（卡号、进/出方向不可改）。取值合法性
+    （行号存在、同卡、重复行号、时刻格式、站点已定义）统一由核心层校验，
+    返回与其他接口一致的 DISPUTE_* 定位错误（HTTP 422）。
+    """
+    line: float = Field(description="被修改刷卡记录的原始来源行号（正整数）")
+    new_time: Optional[str] = Field(
+        default=None, description="临时新时刻（与录入时刻同一套格式）")
+    new_station: Optional[str] = Field(
+        default=None, description="临时新站点（必须是已保存的已知站点）")
+
+
+class DisputeRehearsalIn(BaseModel):
+    """账单争议更正预演请求：同一卡 1～2 笔记录的临时修改。"""
+    edits: list[DisputeEditIn] = Field(
+        description="临时修改列表（1～2 笔，必须同一张卡）")

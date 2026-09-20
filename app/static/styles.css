@@ -430,3 +430,52 @@ tr.gq-over { background: #fff3ea !important; }
 .gq-backlog { color: var(--danger-text); font-weight: 700; }
 tr.gq-peak { box-shadow: inset 0 0 0 2px #e0a03a; }
 tr.gq-peak td { background: #fff7e6; }
+
+/* ---------------- 账单争议更正预演 ---------------- */
+.dispute-edit-row {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 14px 4px;
+  margin-bottom: 10px;
+  background: #fafbfd;
+}
+.dispute-edit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.dispute-edit-head strong { font-size: 13px; color: var(--primary-dark); }
+
+.dispute-edits-echo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.dispute-edit-tag {
+  background: #f6f8fb;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.dispute-edit-tag s { color: var(--muted); }
+
+.dispute-trip-id { white-space: nowrap; }
+.dispute-pair > div { padding: 1px 0; }
+.cell-changed {
+  background: #fff4df;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.cell-changed-num {
+  background: #fff4df;
+  font-weight: 600;
+}
+#dispute-errors-list { margin: 0; padding-left: 20px; }
+#dispute-errors-list li {
+  margin-bottom: 8px;
+  color: var(--danger-text);
+  font-size: 13px;
+}

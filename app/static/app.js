@@ -233,6 +233,7 @@ function renderStations(items) {
     tr.innerHTML = `<td>${escapeHtml(s.name)}</td><td class="num">${s.zone}</td>`;
     tb.appendChild(tr);
   }
+  if ($("dispute-station-options")) disputeStationOptions();
 }
 
 function renderFares(items) {
@@ -1611,6 +1612,260 @@ async function runPassBacktest() {
   }
 }
 
+/* ---------------- 15. 账单争议更正预演（只读） ---------------- */
+
+let lastDisputeSummary = "";
+
+function disputeStationOptions() {
+  // 用「3. 站点分区」已渲染表格中的站点名填充 datalist，方便输入已知站点
+  const names = [];
+  const tb = $("stations-table").querySelector("tbody");
+  tb.querySelectorAll("tr").forEach((tr) => {
+    const td = tr.firstElementChild;
+    if (td && td.textContent) names.push(td.textContent);
+  });
+  const dl = $("dispute-station-options");
+  dl.innerHTML = names.map((n) =>
+    `<option value="${escapeHtml(n)}"></option>`).join("");
+}
+
+function disputeEditBlocks() {
+  return Array.from($("dispute-edits").querySelectorAll(".dispute-edit-row"));
+}
+
+function addDisputeEditRow() {
+  const blocks = disputeEditBlocks();
+  const next = blocks.find((b) => b.hidden);
+  if (next) {
+    next.hidden = false;
+    // 最多两笔：两笔都展示时隐藏「再选一笔」按钮
+    $("btn-dispute-add").hidden = blocks.every((b) => !b.hidden);
+    next.querySelector(".dispute-line").focus();
+  }
+}
+
+function removeDisputeEditRow(rowEl) {
+  // 仅第二笔可移除：清空其输入并隐藏，重新显示「再选一笔」按钮
+  rowEl.querySelectorAll("input").forEach((inp) => { inp.value = ""; });
+  rowEl.hidden = true;
+  $("btn-dispute-add").hidden = false;
+}
+
+function renderDisputeErrors(errors) {
+  const ul = $("dispute-errors-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+  $("dispute-errors").hidden = false;
+  $("dispute-result").hidden = true;
+  $("btn-dispute-copy").hidden = true;
+}
+
+function disputeSideCell(side) {
+  if (!side) return '<span class="tag tag-del">无</span>';
+  return `${escapeHtml(side.entry_station)}（${side.from_zone}区）` +
+    `<div class="sub">${side.entry_time}</div>`;
+}
+
+function disputeExitCell(side) {
+  if (!side) return '<span class="tag tag-del">无</span>';
+  return `${escapeHtml(side.exit_station)}（${side.to_zone}区）` +
+    `<div class="sub">${side.exit_time}</div>`;
+}
+
+function disputeTripIdHtml(r) {
+  return `<span class="dispute-trip-id">进 ` +
+    `<button type="button" class="line-chip" data-line="${r.entry_line}">第 ${r.entry_line} 行</button>` +
+    ` / 出 ` +
+    `<button type="button" class="line-chip" data-line="${r.exit_line}">第 ${r.exit_line} 行</button>` +
+    `</span>`;
+}
+
+function disputeSingleRows(rows, tableId, sideKey) {
+  const tb = $(tableId).querySelector("tbody");
+  tb.innerHTML = "";
+  for (const r of rows) {
+    const s = r[sideKey];
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="line-chip-cell">${disputeTripIdHtml(r)}</td>
+      <td>${s.operating_day}</td>
+      <td>${disputeSideCell(s)}</td>
+      <td>${disputeExitCell(s)}</td>
+      <td class="num">${yuan(s.base_fare)}</td>
+      <td class="num discount">-${yuan(s.discount)}</td>
+      <td class="num charge">${yuan(s.charged_fare)}</td>
+      <td class="wrap">${escapeHtml(s.discount_source)}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll(".line-chip").forEach((chip) => {
+    chip.addEventListener("click", () =>
+      locateRecordLine(Number(chip.dataset.line)));
+  });
+}
+
+function renderDisputeRehearsal(data) {
+  $("dispute-errors").hidden = true;
+  $("dispute-result").hidden = false;
+  $("btn-dispute-copy").hidden = false;
+  lastDisputeSummary = data.summary_text || "";
+
+  // 临时修改回显
+  const echo = $("dispute-edits-echo");
+  echo.innerHTML = (data.edits || []).map((e) => {
+    const changes = [];
+    if (e.time_changed) {
+      changes.push(`时刻 <s>${e.old_time}</s> → <strong>${e.new_time}</strong>`);
+    }
+    if (e.station_changed) {
+      changes.push(`站点 <s>${escapeHtml(e.old_station)}</s> → ` +
+        `<strong>${escapeHtml(e.new_station)}</strong>`);
+    }
+    return `<div class="dispute-edit-tag">` +
+      `<span class="tag ${e.action === "IN" ? "tag-in" : "tag-out"}">` +
+      `${actionText(e.action)}</span>` +
+      `卡号 ${escapeHtml(e.card)} · 第 ${e.line} 行 · ` +
+      (changes.length ? changes.join(" ；") : "（值与原值相同，实际无变化）") +
+      `</div>`;
+  }).join("");
+
+  const s = data.card_summary;
+  const settleCls = s.settlement === "collect" ? "delta-up"
+    : s.settlement === "refund" ? "delta-down" : "delta-zero";
+  $("dispute-summary").innerHTML =
+    `卡号 <strong>${escapeHtml(s.card)}</strong>：当前账单 ` +
+    `<strong>${s.current_trip_count}</strong> 笔 → 更正方案 ` +
+    `<strong>${s.corrected_trip_count}</strong> 笔 · ` +
+    `新增 <strong>${s.added_count}</strong>、移除 <strong>${s.removed_count}</strong>、` +
+    `变化 <strong>${s.changed_count}</strong>、无变化 ${s.unchanged_count} 笔。<br>` +
+    `该卡实扣合计 ${yuan(s.current_charge_total)} → ${yuan(s.corrected_charge_total)} 元` +
+    `（优惠 ${yuan(s.current_discount_total)} → ${yuan(s.corrected_discount_total)}），` +
+    `<span class="${settleCls}">${escapeHtml(s.settlement_text)}</span>` +
+    `（实扣差额 ${deltaText(s.charge_diff)} 元）。<br>` +
+    `<span class="sub">预演全程只读：临时替换只在内存中进行，已保存记录、规则配置与账单均未写回。</span>`;
+
+  // 新增 / 移除
+  $("dispute-added-block").hidden = data.added.length === 0;
+  $("dispute-removed-block").hidden = data.removed.length === 0;
+  disputeSingleRows(data.added, "dispute-added-table", "corrected");
+  disputeSingleRows(data.removed, "dispute-removed-table", "current");
+
+  // 变化
+  const cBlock = $("dispute-changed-block");
+  cBlock.hidden = data.changed.length === 0;
+  const tb = $("dispute-changed-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const r of data.changed) {
+    const c = r.current, n = r.corrected;
+    const dayHtml = (c.operating_day === n.operating_day)
+      ? `${c.operating_day}`
+      : `<span class="day-changed">${c.operating_day}</span> → ` +
+        `<span class="day-changed">${n.operating_day}</span>`;
+    const entryChanged = c.entry_station !== n.entry_station ||
+      c.entry_time !== n.entry_time;
+    const exitChanged = c.exit_station !== n.exit_station ||
+      c.exit_time !== n.exit_time;
+    const entryHtml =
+      `<div class="${entryChanged ? "cell-changed" : ""}">` +
+      `${escapeHtml(c.entry_station)}<div class="sub">${c.entry_time}</div></div>` +
+      `<div class="${entryChanged ? "cell-changed" : ""}">→ ` +
+      `${escapeHtml(n.entry_station)}<div class="sub">${n.entry_time}</div></div>`;
+    const exitHtml =
+      `<div class="${exitChanged ? "cell-changed" : ""}">` +
+      `${escapeHtml(c.exit_station)}<div class="sub">${c.exit_time}</div></div>` +
+      `<div class="${exitChanged ? "cell-changed" : ""}">→ ` +
+      `${escapeHtml(n.exit_station)}<div class="sub">${n.exit_time}</div></div>`;
+    const discCls = r.discount_diff > 0 ? "delta-down"
+      : r.discount_diff < 0 ? "delta-up" : "delta-zero";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="line-chip-cell">${disputeTripIdHtml(r)}</td>
+      <td>${dayHtml}</td>
+      <td class="dispute-pair">${entryHtml}</td>
+      <td class="dispute-pair">${exitHtml}</td>
+      <td class="num ${r.base_fare_changed ? "cell-changed-num" : ""}">` +
+        `${yuan(c.base_fare)} → ${yuan(n.base_fare)}` +
+        (r.base_fare_changed ? `<div class="${deltaClass(r.base_fare_diff)}">${deltaText(r.base_fare_diff)}</div>` : "") +
+      `</td>
+      <td class="num">${yuan(c.discount)} → ${yuan(n.discount)}` +
+        `<div class="num ${discCls}">${deltaText(r.discount_diff)}</div></td>
+      <td class="num charge">${yuan(c.charged_fare)} → ${yuan(n.charged_fare)}` +
+        `<div class="num ${deltaClass(r.charge_diff)}">${deltaText(r.charge_diff)}</div></td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll(".line-chip").forEach((chip) => {
+    chip.addEventListener("click", () =>
+      locateRecordLine(Number(chip.dataset.line)));
+  });
+
+  const note = $("dispute-unchanged-note");
+  note.textContent = data.unchanged_count
+    ? `另有 ${data.unchanged_count} 笔行程的配对、运营日与计价均无变化（未列出）。`
+    : "";
+}
+
+async function runDisputeRehearsal() {
+  const status = $("dispute-status");
+  const blocks = disputeEditBlocks().filter((b) => !b.hidden);
+  const edits = [];
+  for (const b of blocks) {
+    const lineText = b.querySelector(".dispute-line").value.trim();
+    const newTime = b.querySelector(".dispute-time").value.trim();
+    const newStation = b.querySelector(".dispute-station").value.trim();
+    if (!lineText) {
+      status.textContent = "每一笔修改都必须填写原始来源行号";
+      status.className = "status bad";
+      return;
+    }
+    const edit = { line: Number(lineText) };
+    if (newTime) edit.new_time = newTime;
+    if (newStation) edit.new_station = newStation;
+    edits.push(edit);
+  }
+  if (!edits.length) {
+    status.textContent = "请至少选择 1 笔记录";
+    status.className = "status bad";
+    return;
+  }
+  status.textContent = "更正预演中…";
+  status.className = "status";
+  $("dispute-errors").hidden = true;
+  $("dispute-result").hidden = true;
+  $("btn-dispute-copy").hidden = true;
+  try {
+    const data = await api("/api/dispute-rehearsal", {
+      method: "POST",
+      body: JSON.stringify({ edits }),
+    });
+    renderDisputeRehearsal(data);
+    status.textContent =
+      `预演完成：新增 ${data.card_summary.added_count} · 移除 ` +
+      `${data.card_summary.removed_count} · 变化 ${data.card_summary.changed_count}，` +
+      data.card_summary.settlement_text + "（只读，数据均未改动）";
+    status.className = "status ok";
+    toast("争议更正预演完成（只读，未写回任何数据）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      renderDisputeErrors(errors);
+      status.textContent = errors[0].code && errors[0].code.startsWith("DISPUTE_")
+        ? "修改选择 / 取值不合法，未生成预演（数据均未改动）"
+        : "更正后核验存在数据错误，按原有定位错误返回、未产出差额（数据均未改动）";
+    } else {
+      status.textContent = summaryError(e, "更正预演请求失败");
+    }
+    status.className = "status bad";
+    toast("无法生成更正预演", false);
+  }
+}
+
+function copyDisputeSummary() {
+  if (!lastDisputeSummary) {
+    toast("暂无可复制的争议摘要", false);
+    return;
+  }
+  copyText(lastDisputeSummary, "已复制争议摘要（预演只读，记录 / 配置 / 账单均未改动）");
+}
+
 /* ---------------- 演示数据 ---------------- */
 
 const DEMO = {
@@ -1732,6 +1987,11 @@ function bind() {
   $("btn-gate-queue").addEventListener("click", runGateQueue);
   $("btn-gq-csv").addEventListener("click", exportGqCsv);
   $("btn-pass").addEventListener("click", runPassBacktest);
+  $("btn-dispute").addEventListener("click", runDisputeRehearsal);
+  $("btn-dispute-add").addEventListener("click", addDisputeEditRow);
+  $("btn-dispute-copy").addEventListener("click", copyDisputeSummary);
+  $("dispute-edits").querySelectorAll(".dispute-remove").forEach((btn) =>
+    btn.addEventListener("click", () => removeDisputeEditRow(btn.closest(".dispute-edit-row"))));
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);
   $("btn-demo").addEventListener("click", loadDemo);

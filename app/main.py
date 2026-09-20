@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from . import db
 from .core import (
     Config,
+    dispute_rehearsal,
     duration_audit,
     external_merge_preview,
     fare_path_audit,
@@ -31,6 +32,7 @@ from .core import (
 )
 from .schemas import (
     ConfigIn,
+    DisputeRehearsalIn,
     GateQueueIn,
     MergePreviewIn,
     OdPublishIn,
@@ -53,7 +55,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.7.0",
+    version="1.8.0",
     lifespan=lifespan,
 )
 
@@ -582,6 +584,55 @@ def run_pass_backtest(body: PassBacktestIn):
         "saving_total": result.saving_total,
         "passes": result.passes,
         "cards": result.cards,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 账单争议更正预演（只读：内存临时替换，不写回记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/dispute-rehearsal")
+def run_dispute_rehearsal(body: DisputeRehearsalIn):
+    """对同一卡 1～2 笔已保存刷卡记录做账单争议更正预演。
+
+    - 用户按**原始来源行号**选择同一张卡的 1～2 笔记录，每笔只临时修改
+      时刻或站点（不改变卡号与进/出方向）；
+    - 后端在内存中原子替换后，对该批记录重新排序、配对与计价（复用
+      verify 全部规则），**不写回**刷卡记录、规则配置或账单；
+    - 以最近一次成功核验账单为当前账单基准，按（进站原始行号, 出站原始
+      行号）标识行程，列出新增、移除及金额 / 运营日 / 优惠变化，并汇总
+      该卡补收或退款额；
+    - 更正后出现配对、未知站点或缺票价错误时返回 verify() 的原有定位
+      错误且不产出差额；跨卡选择、重复行号、行号不存在、修改值非法
+      返回明确 DISPUTE_* 错误（均为 HTTP 422）。
+    """
+    edits = [e.model_dump() for e in body.edits]
+    with db.connect() as conn:
+        cfg = db.get_config(conn)
+        stations, fares, records = db.load_domain(conn)
+        bills = db.list_bills(conn)
+        result = dispute_rehearsal(
+            stations, fares, records, cfg, bills, edits,
+            default_year=datetime.now().year)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "card": result.card,
+                     "edits": result.edits, "errors": result.errors})
+
+    return {
+        "ok": True,
+        "card": result.card,
+        "edits": result.edits,
+        "added": result.added,
+        "removed": result.removed,
+        "changed": result.changed,
+        "unchanged_count": result.unchanged_count,
+        "current_trip_count": result.current_trip_count,
+        "corrected_trip_count": result.corrected_trip_count,
+        "card_summary": result.card_summary,
+        "summary_text": result.summary_text,
     }
 
 
