@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from . import db
 from .core import (
     Config,
+    dispute_preview,
     duration_audit,
     external_merge_preview,
     fare_path_audit,
@@ -31,6 +32,7 @@ from .core import (
 )
 from .schemas import (
     ConfigIn,
+    DisputePreviewIn,
     GateQueueIn,
     MergePreviewIn,
     OdPublishIn,
@@ -53,7 +55,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.7.0",
+    version="1.8.0",
     lifespan=lifespan,
 )
 
@@ -582,6 +584,51 @@ def run_pass_backtest(body: PassBacktestIn):
         "saving_total": result.saving_total,
         "passes": result.passes,
         "cards": result.cards,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 账单争议更正预演（只读：不写回记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/dispute-preview")
+def run_dispute_preview(body: DisputePreviewIn):
+    """对已保存刷卡记录与最近一次核验账单做账单争议更正预演。
+
+    - 按原始行号选择同一卡的 1～2 笔已保存记录，仅可临时修改时刻或站点；
+    - 后端在内存中原子替换后，对该卡全部记录重新排序、配对与计价
+      （复用 verify()），不写回记录、配置或账单；
+    - 以进出站原始行号对为行程标识，对比当前账单与更正方案，列出新增、
+      移除及金额 / 运营日 / 优惠变化，并汇总该卡补收或退款额；
+    - 更正后出现配对、未知站点或缺票价错误时返回 verify() 的原有定位
+      错误且不产出差额；跨卡选择、重复行号或修改值非法返回 DISPUTE_*
+      明确定位错误；无有效账单时返回 NO_BILLS。
+    """
+    raw_edits = [{"line": e.line, "time": e.time, "station": e.station}
+                 for e in body.edits]
+    with db.connect() as conn:
+        cfg = db.get_config(conn)
+        stations, fares, records = db.load_domain(conn)
+        bills = db.list_bills(conn)
+        last = db.get_meta(conn, "last_verified_at")
+        result = dispute_preview(
+            stations, fares, records, bills, cfg, raw_edits, last)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False,
+                     "card": result.card or None,
+                     "edits": result.edits,
+                     "errors": result.errors})
+
+    return {
+        "ok": True,
+        "card": result.card,
+        "last_verified_at": result.last_verified_at,
+        "edits": result.edits,
+        "trips": result.trips,
+        "summary": result.summary,
     }
 
 

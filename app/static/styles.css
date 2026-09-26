@@ -166,10 +166,11 @@ td.wrap { white-space: normal; min-width: 240px; }
 .errors-panel h3 { color: var(--danger-text); margin-top: 0; }
 #errors-list, #repair-errors-list, #audit-errors-list, #duration-errors-list,
 #peak-errors-list, #merge-errors-list, #od-errors-list, #gq-errors-list,
-#pass-errors-list { margin: 0; padding-left: 20px; }
+#pass-errors-list, #dispute-errors-list { margin: 0; padding-left: 20px; }
 #errors-list li, #repair-errors-list li, #audit-errors-list li,
 #duration-errors-list li, #peak-errors-list li, #merge-errors-list li,
-#od-errors-list li, #gq-errors-list li, #pass-errors-list li {
+#od-errors-list li, #gq-errors-list li, #pass-errors-list li,
+#dispute-errors-list li {
   margin-bottom: 8px;
   color: var(--danger-text);
   font-size: 13px;
@@ -430,3 +431,33 @@ tr.gq-over { background: #fff3ea !important; }
 .gq-backlog { color: var(--danger-text); font-weight: 700; }
 tr.gq-peak { box-shadow: inset 0 0 0 2px #e0a03a; }
 tr.gq-peak td { background: #fff7e6; }
+
+/* ---------------- 账单争议更正预演 ---------------- */
+.dispute-edits { margin-bottom: 4px; }
+.dispute-edit {
+  display: grid;
+  grid-template-columns: 110px 0.9fr 1.3fr 1fr;
+  gap: 12px;
+  align-items: end;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+.dispute-edit-tag {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary-dark);
+  padding-bottom: 9px;
+}
+@media (max-width: 760px) {
+  .dispute-edit { grid-template-columns: 1fr 1fr; }
+}
+
+.dispute-edit-lines { margin: 4px 0 8px; font-size: 13px; }
+
+.tag-same { background: var(--muted); }
+
+td.cell-changed { background: #fff4df; font-weight: 600; }
+tr.dispute-added td { background: #eaf7ee !important; }
+tr.dispute-removed td { background: #fdeeec !important; }

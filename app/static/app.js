@@ -1611,6 +1611,193 @@ async function runPassBacktest() {
   }
 }
 
+/* ---------------- 15. 账单争议更正预演（只读） ---------------- */
+
+let lastDisputeText = "";
+
+function renderDisputeErrors(errors) {
+  const ul = $("dispute-errors-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+  $("dispute-errors").hidden = false;
+  $("dispute-result").hidden = true;
+  $("btn-dispute-copy").hidden = true;
+}
+
+const DISPUTE_STATUS = {
+  added: ["dispute-added", '<span class="tag tag-in">新增</span>'],
+  removed: ["dispute-removed", '<span class="tag tag-del">移除</span>'],
+  changed: ["dispute-changed", '<span class="tag tag-flip">变化</span>'],
+  same: ["", '<span class="tag tag-same">不变</span>'],
+};
+
+function disputeTripHtml(b) {
+  if (!b) return '<span class="sub">—（无此行程）</span>';
+  return `${escapeHtml(b.entry_station)} → ${escapeHtml(b.exit_station)}` +
+    `<div class="sub">${b.entry_time} ～ ${b.exit_time}</div>`;
+}
+
+function renderDispute(data) {
+  $("dispute-errors").hidden = true;
+  $("dispute-result").hidden = false;
+  $("btn-dispute-copy").hidden = false;
+
+  const s = data.summary;
+  const kindHtml = s.kind === "surcharge"
+    ? `<span class="delta-up">应补收 ${yuan(s.delta)} 元</span>`
+    : s.kind === "refund"
+      ? `<span class="delta-down">应退款 ${yuan(-s.delta)} 元</span>`
+      : '<span class="delta-zero">差额为 0，无需补收或退款</span>';
+  const editLines = (data.edits || [])
+    .map((e) => `<div>· ${escapeHtml(e.detail)}</div>`).join("");
+  $("dispute-summary").innerHTML =
+    `卡号 <strong>${escapeHtml(data.card)}</strong> · 当前账单核验时间 ` +
+    `<strong>${escapeHtml(data.last_verified_at || "未知")}</strong> · 本次更正 ` +
+    `<strong>${(data.edits || []).length}</strong> 笔（仅内存预演）：` +
+    `<div class="dispute-edit-lines">${editLines}</div>` +
+    `行程对比：新增 <strong>${s.added_count}</strong> · 移除 ` +
+    `<strong>${s.removed_count}</strong> · 变化 <strong>${s.changed_count}</strong> · ` +
+    `不变 <strong>${s.same_count}</strong>` +
+    `（当前 ${s.trip_count_current} 笔 → 更正后 ${s.trip_count_corrected} 笔）。<br>` +
+    `实扣合计 <strong>${yuan(s.current_total)}</strong> 元 → ` +
+    `<strong>${yuan(s.corrected_total)}</strong> 元，` +
+    `差额 <span class="${deltaClass(s.delta)}">${deltaText(s.delta)} 元</span> → ${kindHtml}；` +
+    `优惠合计 ${yuan(s.current_discount_total)} → ${yuan(s.corrected_discount_total)} 元` +
+    `（差额 ${deltaText(s.discount_delta)} 元）。<br>` +
+    `<span class="sub">行程以「进站行号 → 出站行号」对标识；差额 = 更正后 − 当前，` +
+    `正数为补收、负数为退款；预演全程只读，未写回记录、配置或账单。</span>`;
+
+  const tb = $("dispute-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const t of data.trips || []) {
+    const [rowCls, tag] = DISPUTE_STATUS[t.status] || DISPUTE_STATUS.same;
+    const cur = t.current;
+    const cor = t.corrected;
+    const fields = t.changed_fields || [];
+    const tripHl = (fields.includes("time") || fields.includes("station"))
+      ? "cell-changed" : "";
+    const dayHl = t.day_changed ? "cell-changed" : "";
+    const discHl = fields.includes("discount") ? "cell-changed" : "";
+    const chargeHl = fields.includes("charged_fare") ? "cell-changed" : "";
+    const tr = document.createElement("tr");
+    if (rowCls) tr.className = rowCls;
+    tr.innerHTML = `
+      <td class="num">行 ${t.entry_line} → 行 ${t.exit_line}</td>
+      <td>${tag}</td>
+      <td class="trip ${tripHl}">${disputeTripHtml(cur)}</td>
+      <td class="trip ${tripHl}">${disputeTripHtml(cor)}</td>
+      <td class="${dayHl}">${cur ? cur.operating_day : "—"}</td>
+      <td class="${dayHl}">${cor ? cor.operating_day : "—"}</td>
+      <td class="num discount ${discHl}">${cur ? "-" + yuan(cur.discount) : "—"}</td>
+      <td class="num discount ${discHl}">${cor ? "-" + yuan(cor.discount) : "—"}</td>
+      <td class="num ${chargeHl}">${cur ? yuan(cur.charged_fare) : "—"}</td>
+      <td class="num charge ${chargeHl}">${cor ? yuan(cor.charged_fare) : "—"}</td>
+      <td class="num ${deltaClass(t.charge_diff)}">${deltaText(t.charge_diff)}</td>`;
+    tb.appendChild(tr);
+  }
+  lastDisputeText = buildDisputeText(data);
+}
+
+function buildDisputeText(data) {
+  const s = data.summary;
+  const label = { added: "新增", removed: "移除", changed: "变化", same: "不变" };
+  const seg = (b) => b
+    ? `${b.entry_station}→${b.exit_station} ${b.entry_time}～${b.exit_time}` +
+      ` 实扣${yuan(b.charged_fare)}元 优惠${yuan(b.discount)}元 运营日${b.operating_day}`
+    : "（无此行程）";
+  const lines = [];
+  lines.push("【账单争议更正预演摘要】（只读预演，未写回记录 / 配置 / 账单）");
+  lines.push(`卡号：${data.card}`);
+  lines.push(`当前账单核验时间：${data.last_verified_at || "未知"}`);
+  lines.push("更正内容：");
+  for (const e of data.edits || []) lines.push(`- ${e.detail}`);
+  lines.push(`行程对比（以进出站原始行号对标识）：新增 ${s.added_count} 笔 / ` +
+    `移除 ${s.removed_count} 笔 / 变化 ${s.changed_count} 笔 / 不变 ${s.same_count} 笔`);
+  for (const t of data.trips || []) {
+    if (t.status === "same") continue;
+    lines.push(`- [${label[t.status]}] 行程 行${t.entry_line}→行${t.exit_line}：` +
+      `当前 ${seg(t.current)} ｜ 更正后 ${seg(t.corrected)} ｜ ` +
+      `实扣差额 ${deltaText(t.charge_diff)} 元`);
+  }
+  lines.push(`实扣合计：当前 ${yuan(s.current_total)} 元 → 更正后 ` +
+    `${yuan(s.corrected_total)} 元，差额 ${deltaText(s.delta)} 元`);
+  lines.push(`优惠合计：当前 ${yuan(s.current_discount_total)} 元 → 更正后 ` +
+    `${yuan(s.corrected_discount_total)} 元，差额 ${deltaText(s.discount_delta)} 元`);
+  if (s.kind === "surcharge") {
+    lines.push(`结论：该卡应补收 ${yuan(s.delta)} 元`);
+  } else if (s.kind === "refund") {
+    lines.push(`结论：该卡应退款 ${yuan(-s.delta)} 元`);
+  } else {
+    lines.push("结论：差额为 0，无需补收或退款");
+  }
+  return lines.join("\n");
+}
+
+async function runDisputePreview() {
+  const status = $("dispute-status");
+  const edits = [];
+  for (const i of [1, 2]) {
+    const lineRaw = $(`dispute-line-${i}`).value.trim();
+    const timeRaw = $(`dispute-time-${i}`).value.trim();
+    const stationRaw = $(`dispute-station-${i}`).value.trim();
+    if (!lineRaw && !timeRaw && !stationRaw) continue;  // 整行留空视为未使用
+    if (!lineRaw) {
+      status.textContent = `更正 ${i}：请填写原始行号（第 5 区「来源行」）`;
+      status.className = "status bad";
+      return;
+    }
+    const edit = { line: Number(lineRaw) };
+    if (timeRaw) edit.time = timeRaw;
+    if (stationRaw) edit.station = stationRaw;
+    edits.push(edit);
+  }
+  if (!edits.length) {
+    status.textContent = "请至少填写一笔更正：原始行号 + 新时刻或新站点";
+    status.className = "status bad";
+    return;
+  }
+  status.textContent = "预演中…";
+  status.className = "status";
+  $("dispute-errors").hidden = true;
+  $("dispute-result").hidden = true;
+  $("btn-dispute-copy").hidden = true;
+  try {
+    const data = await api("/api/dispute-preview", {
+      method: "POST",
+      body: JSON.stringify({ edits }),
+    });
+    renderDispute(data);
+    const s = data.summary;
+    status.textContent = s.kind === "surcharge"
+      ? `预演完成：该卡应补收 ${yuan(s.delta)} 元（只读，未写回任何数据）`
+      : s.kind === "refund"
+        ? `预演完成：该卡应退款 ${yuan(-s.delta)} 元（只读，未写回任何数据）`
+        : "预演完成：差额为 0，无需补收或退款（只读，未写回任何数据）";
+    status.className = "status ok";
+    toast("更正预演完成（只读，未保存任何改动）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      renderDisputeErrors(errors);
+      status.textContent = errors[0].code === "NO_BILLS"
+        ? "没有可用的核验账单，请先在「7. 核验结果」成功运行核验"
+        : `存在 ${errors.length} 个错误，未产出差额（数据均未改动）`;
+    } else {
+      status.textContent = summaryError(e, "更正预演请求失败");
+    }
+    status.className = "status bad";
+    toast("无法生成更正预演", false);
+  }
+}
+
+function copyDisputeSummary() {
+  if (!lastDisputeText) {
+    toast("暂无可复制的争议摘要", false);
+    return;
+  }
+  copyText(lastDisputeText, "已复制争议摘要（预演为只读，未写回任何数据）");
+}
+
 /* ---------------- 演示数据 ---------------- */
 
 const DEMO = {
@@ -1667,6 +1854,11 @@ async function loadDemo() {
   $("pass-text").value = DEMO.passes;
   $("pass-start").value = DEMO.pass_start;
   $("pass-end").value = DEMO.pass_end;
+  // 顺带填入一笔争议更正示例：B002 出站（第 10 行）站点改为大学城，
+  // 预演后该行程基础票价 3.00 → 4.00，该卡应补收 1.00 元
+  $("dispute-line-1").value = "10";
+  $("dispute-time-1").value = "";
+  $("dispute-station-1").value = "大学城";
 
   await saveConfig();
   await putText("/api/stations", DEMO.stations);
@@ -1732,6 +1924,8 @@ function bind() {
   $("btn-gate-queue").addEventListener("click", runGateQueue);
   $("btn-gq-csv").addEventListener("click", exportGqCsv);
   $("btn-pass").addEventListener("click", runPassBacktest);
+  $("btn-dispute").addEventListener("click", runDisputePreview);
+  $("btn-dispute-copy").addEventListener("click", copyDisputeSummary);
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);
   $("btn-demo").addEventListener("click", loadDemo);

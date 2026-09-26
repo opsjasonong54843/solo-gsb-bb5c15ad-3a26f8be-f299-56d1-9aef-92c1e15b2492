@@ -638,6 +638,73 @@ X999, 2026-09-18 08:10:00, 中心公园, 进"></textarea>
       </div>
     </section>
 
+    <!-- 账单争议更正预演 -->
+    <section class="card" id="sec-dispute">
+      <h2>15. 账单争议更正预演</h2>
+      <p class="hint">针对<strong>已保存</strong>刷卡记录与<strong>最近一次核验账单</strong>（第 7 区）：
+        按第 5 区的<strong>原始行号</strong>选择同一卡的 <strong>1～2 笔</strong>记录，
+        仅可临时修改<strong>时刻</strong>或<strong>站点</strong>（每项留空表示不修改）。
+        后端在内存中原子替换后，对该卡全部记录重新排序、配对与计价，
+        以<strong>「进站行号 → 出站行号」对</strong>为行程标识对比当前账单与更正方案，
+        列出新增、移除及金额 / 运营日 / 优惠变化，并汇总该卡应<strong>补收</strong>或
+        <strong>退款</strong>的金额。预演<strong>全程只读</strong>：不写回记录、配置或账单；
+        更正后若出现配对、未知站点或缺票价错误，将返回原有定位错误且不产出差额。</p>
+      <div class="dispute-edits">
+        <div class="dispute-edit">
+          <span class="dispute-edit-tag">更正 1</span>
+          <label>原始行号（第 5 区「来源行」）
+            <input type="number" id="dispute-line-1" min="1" step="1" placeholder="如 3" />
+          </label>
+          <label>新时刻（留空表示不改时刻）
+            <input type="text" id="dispute-time-1" placeholder="2026-09-18 08:00:00" />
+          </label>
+          <label>新站点（留空表示不改站点）
+            <input type="text" id="dispute-station-1" placeholder="科技园" />
+          </label>
+        </div>
+        <div class="dispute-edit">
+          <span class="dispute-edit-tag">更正 2（可选）</span>
+          <label>原始行号
+            <input type="number" id="dispute-line-2" min="1" step="1" />
+          </label>
+          <label>新时刻（留空表示不改时刻）
+            <input type="text" id="dispute-time-2" />
+          </label>
+          <label>新站点（留空表示不改站点）
+            <input type="text" id="dispute-station-2" />
+          </label>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-dispute" type="button">🧾 运行更正预演</button>
+        <button class="btn btn-ghost" id="btn-dispute-copy" type="button" hidden>📋 复制争议摘要</button>
+        <span id="dispute-status" class="status"></span>
+      </div>
+
+      <div id="dispute-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成更正预演 —— 请处理以下问题（记录、配置与账单均未改动）</h3>
+        <ul id="dispute-errors-list"></ul>
+      </div>
+
+      <div id="dispute-result" class="audit-result" hidden>
+        <div id="dispute-summary" class="audit-summary"></div>
+        <div class="table-wrap">
+          <table id="dispute-table">
+            <thead>
+              <tr>
+                <th>行程标识（进→出 行号）</th><th>状态</th>
+                <th>行程（当前账单）</th><th>行程（更正方案）</th>
+                <th>运营日（当前）</th><th>运营日（更正）</th>
+                <th>优惠（当前）</th><th>优惠（更正）</th>
+                <th>实扣（当前）</th><th>实扣（更正）</th><th>实扣差额</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <footer class="footer">
       FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
       <a href="/docs" target="_blank">API 文档</a>

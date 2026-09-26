@@ -2539,3 +2539,296 @@ def pass_backtest(bills: list[dict],
                  "valid_days": p.valid_days} for p in passes],
         cards=card_rows,
     )
+
+
+# ---------------------------------------------------------------------------
+# 账单争议更正预演（只读：不写回记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+# 一次预演允许更正的记录笔数（按原始行号选择，须为同一张卡）
+DISPUTE_MIN_EDITS = 1
+DISPUTE_MAX_EDITS = 2
+
+# 行程对比输出中携带的账单字段（当前 / 更正两侧同一视图）
+_DISPUTE_BILL_KEYS = (
+    "operating_day", "entry_time", "exit_time",
+    "entry_station", "exit_station", "from_zone", "to_zone",
+    "base_fare", "discount", "discount_source",
+    "charged_fare", "daily_cumulative", "daily_cap",
+    "entry_line", "exit_line",
+)
+
+
+@dataclass
+class DisputePreview:
+    """账单争议更正预演结果。
+
+    ok=False 时 errors 为定位错误（DISPUTE_* / NO_BILLS，或更正后 verify()
+    的原有定位错误），不产出任何差额。ok=True 时 trips 以（进站原始行号,
+    出站原始行号）对标识，status 为 added / removed / changed / same；
+    summary 汇总该卡实扣合计差额（delta>0 为应补收，delta<0 为应退款）。
+    """
+    ok: bool
+    card: str = ""
+    edits: list[dict] = field(default_factory=list)
+    last_verified_at: Optional[str] = None
+    trips: list[dict] = field(default_factory=list)
+    summary: dict = field(default_factory=dict)
+    errors: list[dict] = field(default_factory=list)
+
+
+def _dispute_bill_view(bill: Optional[dict]) -> Optional[dict]:
+    """账单行的对比视图（两侧字段一致；缺失侧为 None）。"""
+    if bill is None:
+        return None
+    return {k: bill[k] for k in _DISPUTE_BILL_KEYS}
+
+
+def _dispute_changed_fields(cur: dict, new: dict) -> list[str]:
+    """同一行程（行号对相同）两侧账单的差异字段列表（供页面高亮）。"""
+    fields: list[str] = []
+    if cur["entry_time"] != new["entry_time"] \
+            or cur["exit_time"] != new["exit_time"]:
+        fields.append("time")
+    if cur["entry_station"] != new["entry_station"] \
+            or cur["exit_station"] != new["exit_station"]:
+        fields.append("station")
+    if cur["operating_day"] != new["operating_day"]:
+        fields.append("operating_day")
+    if cur["base_fare"] != new["base_fare"]:
+        fields.append("base_fare")
+    if cur["discount"] != new["discount"]:
+        fields.append("discount")
+    if cur["charged_fare"] != new["charged_fare"]:
+        fields.append("charged_fare")
+    if cur["daily_cumulative"] != new["daily_cumulative"]:
+        fields.append("daily_cumulative")
+    return fields
+
+
+def dispute_preview(stations: list[Station],
+                    fares: list[Fare],
+                    records: list[Swipe],
+                    bills: list[dict],
+                    cfg: Config,
+                    raw_edits,
+                    last_verified_at: Optional[str]) -> DisputePreview:
+    """账单争议更正预演（全程只读：不写回记录、配置或账单）。
+
+    - 用户按**原始行号**选择同一卡的 1～2 笔已保存记录，仅可临时修改
+      **时刻**或**站点**（每项留空表示不修改）；
+    - 后端在内存中**原子替换**（新建修正记录对象，原对象不被改动），对该卡
+      全部记录按时刻**重新排序**后，连同其他卡记录一起复用 verify()
+      重新配对与计价；
+    - 更正后若出现配对、未知站点或缺票价等错误，verify() 的**原有定位
+      错误**原样返回，不产出任何差额；
+    - 成功时以**（进站原始行号, 出站原始行号）对**作为行程标识，对比
+      当前账单（最近一次核验写入的账单）与更正方案：新增、移除、
+      变化（时刻 / 站点 / 运营日 / 基础票价 / 优惠 / 实扣 / 当日累计）
+      与不变逐行程列出，并汇总该卡的**补收**（差额为正）或**退款**
+      （差额为负）金额；
+    - 跨卡选择（DISPUTE_CROSS_CARD）、重复行号（DISPUTE_LINE_DUPLICATE）、
+      行号不存在（DISPUTE_LINE_UNKNOWN）、未给出修改值
+      （DISPUTE_BAD_FIELDS）、时刻值非法（DISPUTE_BAD_TIME）、更正笔数
+      非法（DISPUTE_EDIT_COUNT）返回明确错误；无有效账单时返回
+      NO_BILLS（与通票回测同口径）。
+    """
+    if not isinstance(raw_edits, (list, tuple)) \
+            or not (DISPUTE_MIN_EDITS <= len(raw_edits) <= DISPUTE_MAX_EDITS):
+        n = len(raw_edits) if isinstance(raw_edits, (list, tuple)) else 0
+        return DisputePreview(ok=False, errors=[_err(
+            "DISPUTE_EDIT_COUNT",
+            f"更正预演需按原始行号选择 {DISPUTE_MIN_EDITS}～"
+            f"{DISPUTE_MAX_EDITS} 笔同一卡的记录，实际 {n} 笔")])
+
+    errors: list[dict] = []
+    if not last_verified_at:
+        errors.append(_err(
+            "NO_BILLS",
+            "尚未生成有效账单：请先在「7. 核验结果」成功运行核验，"
+            "更正预演以最近一次核验生成的账单为当前账单"))
+
+    line_of = {r.line: r for r in records}
+    seen_lines: set[int] = set()
+    parsed: list[dict] = []
+    for e in raw_edits:
+        raw_line = e.get("line")
+        if not _is_int_value(raw_line) or int(raw_line) < 1:
+            errors.append(_err(
+                "DISPUTE_LINE_UNKNOWN",
+                f"原始行号必须是不小于 1 的整数：{raw_line!r}"))
+            continue
+        line = int(raw_line)
+        if line in seen_lines:
+            errors.append(_err(
+                "DISPUTE_LINE_DUPLICATE",
+                f"重复选择同一原始行号：第 {line} 行", line=line))
+            continue
+        seen_lines.add(line)
+        rec = line_of.get(line)
+        if rec is None:
+            errors.append(_err(
+                "DISPUTE_LINE_UNKNOWN",
+                f"已保存刷卡记录中不存在第 {line} 行"
+                "（请对照「5. 刷卡记录」的来源行号）", line=line))
+            continue
+        raw_time = e.get("time")
+        raw_station = e.get("station")
+        has_time = raw_time is not None and str(raw_time).strip() != ""
+        has_station = raw_station is not None and str(raw_station).strip() != ""
+        if not has_time and not has_station:
+            errors.append(_err(
+                "DISPUTE_BAD_FIELDS",
+                f"第 {line} 行的更正未给出任何修改值："
+                "新时刻与新站点至少填写一项",
+                line=line, card=rec.card, time=rec.time_text,
+                station=rec.station))
+            continue
+        new_t: Optional[datetime] = None
+        if has_time:
+            try:
+                new_t = parse_time(str(raw_time).strip())
+            except ValueError as ex:
+                errors.append(_err(
+                    "DISPUTE_BAD_TIME", str(ex),
+                    line=line, card=rec.card, station=rec.station))
+                continue
+        parsed.append({
+            "line": line, "record": rec,
+            "time": new_t,
+            "station": str(raw_station).strip() if has_station else None,
+        })
+
+    cards = {p["record"].card for p in parsed}
+    if len(cards) > 1:
+        errors.append(_err(
+            "DISPUTE_CROSS_CARD",
+            "更正预演只能选择同一张卡的记录，实际涉及卡号："
+            + "、".join(sorted(cards))))
+
+    if errors:
+        return DisputePreview(ok=False, errors=errors)
+
+    card = parsed[0]["record"].card
+    edit_by_line = {p["line"]: p for p in parsed}
+
+    # 内存中的原子替换：为该卡生成修正后的全新记录列表（原对象不被改动），
+    # 随后对该卡全部记录按时刻重新排序（同时刻按行号稳定，重复刷卡由
+    # verify() 按原有 DUPLICATE_SWIPE 定位）。
+    corrected_card: list[Swipe] = []
+    applied: list[dict] = []
+    for r in records:
+        if r.card != card:
+            continue
+        p = edit_by_line.get(r.line)
+        if p is None:
+            corrected_card.append(r)
+            continue
+        new_t = p["time"] if p["time"] is not None else r.t
+        new_station = p["station"] if p["station"] is not None else r.station
+        corrected_card.append(Swipe(card=r.card, t=new_t, station=new_station,
+                                    action=r.action, line=r.line))
+        parts: list[str] = []
+        if p["time"] is not None:
+            parts.append(f"时刻 {r.time_text} → "
+                         f"{new_t.strftime('%Y-%m-%d %H:%M:%S')}")
+        if p["station"] is not None:
+            parts.append(f"站点 {r.station} → {new_station}")
+        applied.append({
+            "line": r.line,
+            "card": r.card,
+            "action": r.action,
+            "direction": ACTION_LABELS.get(r.action, r.action),
+            "old_time": r.time_text,
+            "new_time": new_t.strftime("%Y-%m-%d %H:%M:%S")
+                        if p["time"] is not None else None,
+            "old_station": r.station,
+            "new_station": p["station"],
+            "detail": f"第 {r.line} 行（{r.card} {r.time_text} @ {r.station} "
+                      f"{ACTION_LABELS.get(r.action, r.action)}）："
+                      + "；".join(parts),
+        })
+    corrected_card.sort(key=lambda r: (r.t, r.line))
+    applied.sort(key=lambda a: a["line"])
+
+    # 其他卡记录保持原样；全量复用 verify() 完成重新配对与计价
+    corrected_records = [r for r in records if r.card != card] + corrected_card
+    result = verify(stations, fares, corrected_records, cfg)
+    if not result.ok:
+        # 更正后出现的配对 / 未知站点 / 缺票价等错误：原有定位错误原样返回，
+        # 不产出任何差额
+        return DisputePreview(ok=False, card=card, edits=applied,
+                              errors=result.errors)
+
+    # 以（进站原始行号, 出站原始行号）对为行程标识，对比当前账单与更正方案
+    current_bills = [b for b in bills if b["card"] == card]
+    corrected_bills = [b for b in result.bills if b["card"] == card]
+    cur_map = {(b["entry_line"], b["exit_line"]): b for b in current_bills}
+    new_map = {(b["entry_line"], b["exit_line"]): b for b in corrected_bills}
+
+    trips: list[dict] = []
+    added = removed = changed = same = 0
+    for key in sorted(set(cur_map) | set(new_map)):
+        cb = cur_map.get(key)
+        nb = new_map.get(key)
+        day_changed: Optional[bool] = None
+        fields: list[str] = []
+        if cb is None:
+            status = "added"
+            added += 1
+            charge_diff = _round2(nb["charged_fare"])
+            discount_diff = _round2(nb["discount"])
+        elif nb is None:
+            status = "removed"
+            removed += 1
+            charge_diff = _round2(-cb["charged_fare"])
+            discount_diff = _round2(-cb["discount"])
+        else:
+            fields = _dispute_changed_fields(cb, nb)
+            day_changed = cb["operating_day"] != nb["operating_day"]
+            charge_diff = _round2(nb["charged_fare"] - cb["charged_fare"])
+            discount_diff = _round2(nb["discount"] - cb["discount"])
+            if fields:
+                status = "changed"
+                changed += 1
+            else:
+                status = "same"
+                same += 1
+        trips.append({
+            "entry_line": key[0],
+            "exit_line": key[1],
+            "trip_key": f"{key[0]}→{key[1]}",
+            "status": status,
+            "current": _dispute_bill_view(cb),
+            "corrected": _dispute_bill_view(nb),
+            "charge_diff": charge_diff,
+            "discount_diff": discount_diff,
+            "day_changed": day_changed,
+            "changed_fields": fields,
+        })
+
+    cur_total = _round2(sum(b["charged_fare"] for b in current_bills))
+    new_total = _round2(sum(b["charged_fare"] for b in corrected_bills))
+    cur_disc = _round2(sum(b["discount"] for b in current_bills))
+    new_disc = _round2(sum(b["discount"] for b in corrected_bills))
+    delta = _round2(new_total - cur_total)
+    summary = {
+        "current_total": cur_total,
+        "corrected_total": new_total,
+        "delta": delta,
+        "kind": "surcharge" if delta > 0
+                else "refund" if delta < 0 else "none",
+        "current_discount_total": cur_disc,
+        "corrected_discount_total": new_disc,
+        "discount_delta": _round2(new_disc - cur_disc),
+        "trip_count_current": len(current_bills),
+        "trip_count_corrected": len(corrected_bills),
+        "added_count": added,
+        "removed_count": removed,
+        "changed_count": changed,
+        "same_count": same,
+    }
+    return DisputePreview(
+        ok=True, card=card, edits=applied,
+        last_verified_at=last_verified_at,
+        trips=trips, summary=summary)
